@@ -1,240 +1,236 @@
-import streamlit as st
-import networkx as nx
-import matplotlib.pyplot as plt
+from __future__ import annotations
+import html
 import pandas as pd
-from collections import Counter
+import streamlit as st
 
-# ==========================================
-# 🎨 ตั้งค่าหน้า Streamlit
-# ==========================================
-st.set_page_config(
-    page_title="Computer Recommender System",
-    page_icon="",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from neo4j_service import (
+    RECOMMEND_CYPHER,
+    add_computer,
+    add_person,
+    clear_graph_data,
+    get_computers,
+    get_liked,
+    get_metrics,
+    get_people,
+    graph_edges,
+    ping,
+    popular_fallback,
+    recommend_computers,
+    seed_demo_data,
+    set_likes,
+    similar_people,
+    top_computers,
 )
 
-# ==========================================
-# 🗄️ ฐานข้อมูลคอมพิวเตอร์
-# ==========================================
-computer_db = [
-    {'id': 'C001', 'brand': 'Dell',     'model': 'Dell XPS 13',                  'category': 'Ultrabook',  'price': 42900},
-    {'id': 'C002', 'brand': 'HP',       'model': 'HP Spectre x360',              'category': '2-in-1',     'price': 48900},
-    {'id': 'C003', 'brand': 'Lenovo',   'model': 'Lenovo ThinkPad X1 Carbon',    'category': 'Business',   'price': 55900},
-    {'id': 'C004', 'brand': 'Apple',    'model': 'Apple MacBook Pro',            'category': 'Ultrabook',  'price': 69900},
-    {'id': 'C005', 'brand': 'ASUS',     'model': 'ASUS ROG Zephyrus G14',        'category': 'Gaming',     'price': 52900},
-    {'id': 'C006', 'brand': 'Acer',     'model': 'Acer Swift 3',                 'category': 'Ultrabook',  'price': 25900},
-    {'id': 'C007', 'brand': 'MSI',      'model': 'MSI Prestige 14',              'category': 'Creator',    'price': 39900},
-    {'id': 'C008', 'brand': 'Microsoft','model': 'Microsoft Surface Laptop 5',   'category': 'Ultrabook',  'price': 44900},
-    {'id': 'C009', 'brand': 'Samsung',  'model': 'Samsung Galaxy Book3',         'category': 'Ultrabook',  'price': 38900},
-    {'id': 'C010', 'brand': 'Razer',    'model': 'Razer Blade 15',               'category': 'Gaming',     'price': 79900},
-]
+st.set_page_config(page_title="Computer Recommender", page_icon="💻", layout="wide", initial_sidebar_state="expanded")
 
-df_computers = pd.DataFrame(computer_db)
+st.markdown(
+    """
+    <style>
+      .block-container {padding-top: 1.3rem; padding-bottom: 2rem;}
+      .hero {padding: 1.4rem 1.6rem; border-radius: 22px; margin-bottom: 1rem; color: white;
+             background: linear-gradient(120deg, #0f172a 0%, #1e293b 55%, #0369a1 100%);}
+      .hero h1 {margin:0; font-size:2.1rem;}
+      .hero p {opacity:.88; margin:.35rem 0 0 0;}
+      .card {padding: 1rem 1.1rem; border: 1px solid rgba(128,128,128,.25); border-radius: 16px; margin-bottom: .75rem;}
+      .pill {display:inline-block; padding:.2rem .55rem; border-radius:999px; background:#0369a1;
+             color:white; font-size:.8rem; font-weight:700;}
+      .muted {opacity:.72; font-size:.9rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# ==========================================
-#  ข้อมูลคนและความชอบ
-# ==========================================
-people = ['Ing', 'Somying', 'Natee', 'Mana', 'Wichai', 'On', 'Beam', 'Non', 'Games', 'Palm']
+def require_connection() -> None:
+    try:
+        if not ping():
+            raise RuntimeError("Neo4j did not return a healthy response")
+    except Exception as exc:
+        st.error("ยังเชื่อมต่อ Neo4j ไม่สำเร็จ")
+        st.code(
+            '[neo4j]\nuri = "neo4j+s://YOUR_INSTANCE.databases.neo4j.io"\n'
+            'username = "neo4j"\npassword = "YOUR_PASSWORD"',
+            language="toml",
+        )
+        st.caption("นำค่าไปใส่ใน Streamlit Secrets (`.streamlit/secrets.toml`) และห้าม commit password ลง GitHub")
+        st.exception(exc)
+        st.stop()
 
-likes = [
-    ('Ing', 'Dell XPS 13'), ('Ing', 'HP Spectre x360'), ('Ing', 'Lenovo ThinkPad X1 Carbon'),
-    ('Somying', 'Dell XPS 13'), ('Somying', 'HP Spectre x360'), ('Somying', 'Apple MacBook Pro'), ('Somying', 'ASUS ROG Zephyrus G14'),
-    ('Natee', 'Dell XPS 13'), ('Natee', 'Apple MacBook Pro'), ('Natee', 'Acer Swift 3'),
-    ('Mana', 'ASUS ROG Zephyrus G14'), ('Mana', 'Acer Swift 3'), ('Mana', 'MSI Prestige 14'),
-    ('Wichai', 'HP Spectre x360'), ('Wichai', 'Apple MacBook Pro'), ('Wichai', 'Samsung Galaxy Book3'),
-    ('On', 'Dell XPS 13'), ('On', 'Microsoft Surface Laptop 5'), ('On', 'Lenovo ThinkPad X1 Carbon'),
-    ('Beam', 'Apple MacBook Pro'), ('Beam', 'Acer Swift 3'), ('Beam', 'Lenovo ThinkPad X1 Carbon'),
-    ('Non', 'ASUS ROG Zephyrus G14'), ('Non', 'MSI Prestige 14'), ('Non', 'Samsung Galaxy Book3'),
-    ('Games', 'Samsung Galaxy Book3'), ('Games', 'Razer Blade 15'), ('Games', 'Apple MacBook Pro'),
-    ('Palm', 'Microsoft Surface Laptop 5'), ('Palm', 'Dell XPS 13'), ('Palm', 'HP Spectre x360')
-]
+def person_selector(key: str) -> str:
+    people = get_people()
+    if not people:
+        st.info("ยังไม่มีข้อมูลผู้ใช้ ไปที่หน้า Admin / Setup แล้วสร้างข้อมูลตัวอย่างก่อน")
+        st.stop()
+    default = people.index("Ing") if "Ing" in people else 0
+    return st.selectbox("ผู้ใช้เป้าหมาย", people, index=default, key=key)
 
-# ==========================================
-# ️ สร้าง Graph
-# ==========================================
-@st.cache_resource
-def build_graph():
-    G = nx.Graph()
-    for person in people:
-        G.add_node(person, node_type="person")
-    for comp in computer_db:
-        G.add_node(comp['model'], node_type="computer", comp_id=comp['id'])
-    G.add_edges_from(likes)
-    return G
+def explain(row: dict) -> str:
+    parts = []
+    if row["similar_voters"]:
+        parts.append(f"คนรสนิยมคล้ายกัน {row['similar_voters']} คนชอบ: {', '.join(row['similar_names'])}")
+    parts.append(f"มีคนชอบทั้งหมด {row['popularity']} คน")
+    return " · ".join(parts)
 
-G = build_graph()
+require_connection()
 
-# ==========================================
-# 🧠 ฟังก์ชันแนะนำคอมพิวเตอร์
-# ==========================================
-def recommend_computers(G, target_person, top_n=5):
-    recommendations = Counter()
-    liked_computers = set(G.neighbors(target_person))
-    
-    for computer in liked_computers:
-        for similar_person in G.neighbors(computer):
-            if similar_person == target_person:
-                continue
-            for other_computer in G.neighbors(similar_person):
-                if other_computer not in liked_computers:
-                    recommendations[other_computer] += 1
-    
-    return recommendations.most_common(top_n)
+with st.sidebar:
+    st.markdown("## 💻 Computer Recommender")
+    st.caption("Neo4j + Streamlit Final Project")
+    page = st.radio("เมนู", ["Dashboard", "Recommendations", "Like / Unlike", "Graph Explorer", "Admin / Setup"])
+    st.divider()
+    st.caption("Graph-based Collaborative Filtering")
 
-# ==========================================
-# 🎨 วาด Graph
-# ==========================================
-def draw_graph(G, highlight_person=None):
-    fig, ax = plt.subplots(figsize=(10, 7))
-    pos = nx.spring_layout(G, seed=42, k=1.2)
-    
-    node_colors = []
-    node_sizes = []
-    for node in G.nodes():
-        if G.nodes[node].get('node_type') == 'person':
-            if node == highlight_person:
-                node_colors.append('#FF4500')  # สีแดงส้มสำหรับคนที่เลือก
-                node_sizes.append(1200)
-            else:
-                node_colors.append('#87CEEB')  # ฟ้า
-                node_sizes.append(700)
+st.markdown(
+    """
+    <div class="hero">
+      <h1>💻 Computer Recommendation System</h1>
+      <p>แนะนำคอมพิวเตอร์จากความชอบของผู้ใช้ที่คล้ายกัน ด้วย Graph Database</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ------------------------------------------------------------------ Dashboard
+if page == "Dashboard":
+    m = get_metrics()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("จำนวนผู้ใช้ (Persons)", m["persons"])
+    c2.metric("รุ่นคอมพิวเตอร์ (Computers)", m["computers"])
+    c3.metric("ความชอบ (LIKES)", m["likes"])
+
+    st.divider()
+    left, right = st.columns([3, 2])
+    with left:
+        st.subheader("คอมพิวเตอร์ยอดนิยม")
+        tops = top_computers(10)
+        if tops:
+            df_tops = pd.DataFrame(tops)
+            df_tops["display"] = df_tops["computer"] + " (" + df_tops["brand"] + ")"
+            st.bar_chart(df_tops.set_index("display")["likes"])
         else:
-            node_colors.append('#FFA500')  # ส้ม
-            node_sizes.append(900)
+            st.info("ยังไม่มีข้อมูล")
+    with right:
+        st.subheader("โปรไฟล์ผู้ใช้")
+        person = person_selector("dash_person")
+        liked = get_liked(person)
+        st.write("**ชอบ:** " + (", ".join(liked) if liked else "ยังไม่มี"))
+        sims = similar_people(person)
+        if sims:
+            df = pd.DataFrame(sims)
+            df["shared_computers"] = df["shared_computers"].apply(", ".join)
+            st.caption("ผู้ใช้ที่คล้ายกัน")
+            st.dataframe(df, width="stretch", hide_index=True)
+        else:
+            st.caption("ยังไม่มีผู้ใช้ที่ชอบคอมพิวเตอร์ร่วมกัน")
+
+# ------------------------------------------------------------------ Recommendations
+elif page == "Recommendations":
+    st.subheader("✨ คอมพิวเตอร์ที่แนะนำ")
+    person = person_selector("rec_person")
+    c1, c2 = st.columns(2)
+    top_n = c1.slider("จำนวนคำแนะนำ", 1, 10, 5)
+    sim_w = c2.slider("น้ำหนักรสนิยมคล้ายกัน (Collaborative Weight)", 0.5, 5.0, 1.0, 0.5)
     
-    nx.draw_networkx_edges(G, pos, ax=ax, edge_color='gray', alpha=0.4, width=1)
-    nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_colors, node_size=node_sizes, alpha=0.9)
-    nx.draw_networkx_labels(G, pos, ax=ax, font_size=8, font_weight='bold')
-    
-    ax.set_title("Computer Recommender System - Graph Network", fontsize=14, fontweight='bold')
-    ax.axis('off')
-    plt.tight_layout()
-    return fig
+    liked = get_liked(person)
+    st.write(f"**{person} ชอบ:** " + (", ".join(liked) if liked else "ยังไม่มี"))
 
-# ==========================================
-# 🖥️ UI ส่วนหัว
-# ==========================================
-st.title(" Computer Recommender System")
-st.markdown("""
-ระบบแนะนำคอมพิวเตอร์ด้วย **Graph-based Collaborative Filtering**  
-ค้นหาคนที่มีความชอบคล้ายกัน → แนะนำคอมพิวเตอร์รุ่นใหม่ที่ตรงรสนิยม
-""")
-
-st.divider()
-
-# ==========================================
-# 📊 Sidebar: เลือกคน & ดูข้อมูล
-# ==========================================
-st.sidebar.header("⚙️ ตั้งค่า")
-selected_person = st.sidebar.selectbox(
-    " เลือกบุคคลที่ต้องการแนะนำ",
-    people,
-    index=0
-)
-
-top_n = st.sidebar.slider("📈 จำนวนคำแนะนำที่ต้องการ", 1, 10, 5)
-
-st.sidebar.divider()
-st.sidebar.subheader("📋 ข้อมูลคอมพิวเตอร์ทั้งหมด")
-st.sidebar.dataframe(
-    df_computers[['id', 'brand', 'model', 'category', 'price']],
-    use_container_width=True,
-    hide_index=True
-)
-
-# ==========================================
-# ️ แสดง Graph
-# ==========================================
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("🕸️ Graph Network")
-    st.caption("โหนดสีฟ้า = คน | โหนดสีส้ม = คอมพิวเตอร์ | โหนดแดง = คนที่เลือก")
-    fig = draw_graph(G, highlight_person=selected_person)
-    st.pyplot(fig)
-
-# ==========================================
-# 👤 ข้อมูลคนที่เลือก
-# ==========================================
-with col2:
-    st.subheader(f"👤 {selected_person}")
-    liked = list(G.neighbors(selected_person))
-    st.markdown(f"**ชอบคอมพิวเตอร์ {len(liked)} รุ่น:**")
-    for comp in liked:
-        st.markdown(f"  • 💚 {comp}")
-    
-    # หาเพื่อนที่มีความชอบร่วมกัน
-    st.markdown("**👥 คนที่มีความชอบร่วมกัน:**")
-    common_friends = set()
-    for comp in liked:
-        for person in G.neighbors(comp):
-            if person != selected_person:
-                common_friends.add(person)
-    for friend in common_friends:
-        st.markdown(f"  •  {friend}")
-
-st.divider()
-
-# ==========================================
-# 🎯 ส่วนแนะนำ
-# ==========================================
-st.subheader(f"🎯 คำแนะนำคอมพิวเตอร์สำหรับ {selected_person}")
-st.caption("เรียงตามคะแนนความน่าจะเป็น (ยิ่งสูง = ยิ่งตรงกับรสนิยม)")
-
-recommendations = recommend_computers(G, selected_person, top_n=top_n)
-
-if recommendations:
-    cols = st.columns(min(len(recommendations), 5))
-    for idx, (comp, score) in enumerate(recommendations):
-        with cols[idx % len(cols)]:
-            # ดึงข้อมูลจาก database
-            comp_info = df_computers[df_computers['model'] == comp].iloc[0]
+    rows = recommend_computers(person, top_n, sim_w)
+    if rows:
+        st.caption("score = (จำนวนคนรสนิยมคล้ายกันที่ชอบ × น้ำหนัก)")
+        for i, r in enumerate(rows, start=1):
+            st.markdown(
+                f"""
+                <div class="card">
+                  <span class="pill">#{i} · score {r['score']:.1f}</span>
+                  <h3 style="margin:.55rem 0 .2rem 0">{html.escape(r['computer'])}</h3>
+                  <p class="muted">
+                    <b>ยี่ห้อ:</b> {r['brand']} | <b>ประเภท:</b> {r['category']} | <b>ราคา:</b> ฿{r['price']:,}<br>
+                    {html.escape(explain(r))}
+                  </p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.warning("ยังไม่มีผู้ใช้ที่ชอบคอมพิวเตอร์ร่วมกับคนนี้ จึงแนะนำจากความนิยมแทน")
+        for r in popular_fallback(person, top_n):
+            st.write(f"- **{r['computer']}** ({r['brand']}) — มีคนชอบ {r['likes']} คน")
             
-            with st.container(border=True):
-                st.markdown(f"### {comp}")
-                st.markdown(f"**ยี่ห้อ:** {comp_info['brand']}")
-                st.markdown(f"**ประเภท:** {comp_info['category']}")
-                st.metric(label="💰 ราคา", value=f"฿{comp_info['price']:,}")
-                st.metric(label="⭐ คะแนนแนะนำ", value=score)
-else:
-    st.info(f"ไม่พบคำแนะนำสำหรับ {selected_person} (อาจชอบคอมพิวเตอร์ทุกตัวแล้ว)")
+    with st.expander("ดู Cypher Query"):
+        st.code(RECOMMEND_CYPHER.strip(), language="cypher")
 
-st.divider()
+# ------------------------------------------------------------------ Like / Unlike
+elif page == "Like / Unlike":
+    st.subheader("❤️ แก้ไขคอมพิวเตอร์ที่ชอบ")
+    st.caption("เลือกคอมพิวเตอร์ที่ผู้ใช้ชอบ แล้วกดบันทึก จากนั้นดูว่าคำแนะนำเปลี่ยนอย่างไร")
+    person = person_selector("like_person")
+    computers = get_computers()
+    current = get_liked(person)
+    chosen = st.multiselect("คอมพิวเตอร์ที่ชอบ", computers, default=current, key=f"likes_{person}")
+    if st.button("บันทึก", type="primary", width="stretch"):
+        set_likes(person, chosen)
+        st.success(f"บันทึก LIKES ของ {person} แล้ว ({len(chosen)} รุ่น)")
+        st.rerun()
 
-# ==========================================
-# 📊 ตารางเปรียบเทียบ
-# ==========================================
-st.subheader("📊 ตารางเปรียบเทียบคำแนะนำ")
-if recommendations:
-    rec_df = pd.DataFrame(recommendations, columns=['model', 'score'])
-    rec_df = rec_df.merge(df_computers[['model', 'brand', 'category', 'price']], on='model')
-    rec_df = rec_df[['model', 'brand', 'category', 'price', 'score']]
-    rec_df.columns = ['รุ่น', 'ยี่ห้อ', 'ประเภท', 'ราคา (บาท)', 'คะแนน']
-    st.dataframe(rec_df, use_container_width=True, hide_index=True)
+# ------------------------------------------------------------------ Graph Explorer
+elif page == "Graph Explorer":
+    st.subheader("🕸️ Graph Explorer")
+    person = person_selector("graph_person")
+    edges = graph_edges(person)
+    if not edges:
+        st.info("ผู้ใช้นี้ยังไม่มี LIKES")
+    else:
+        recs = {r["computer"] for r in recommend_computers(person, 10)}
+        mine = {e["computer"] for e in edges if e["person"] == person}
+        
+        st.caption("🟠 ส้ม = ผู้ใช้เป้าหมาย · 🔵 ฟ้า = คอมพิวเตอร์ที่แนะนำ · 🟢 เขียว = คอมพิวเตอร์ที่ชอบอยู่แล้ว")
+        dot = ["digraph G {", "rankdir=LR;", 'node [fontname="Helvetica", style=filled];']
+        
+        # Nodes
+        for p in sorted({e["person"] for e in edges} | {person}):
+            color = "#fbbf24" if p == person else "#bfdbfe"
+            dot.append(f'"{p}" [shape=ellipse, fillcolor="{color}"];')
+        for c in sorted({e["computer"] for e in edges}):
+            color = "#86efac" if c in recs else ("#93c5fd" if c in mine else "#e5e7eb")
+            dot.append(f'"{c}" [shape=box, fillcolor="{color}"];')
+            
+        # Edges
+        for e in edges:
+            dot.append(f'"{e["person"]}" -> "{e["computer"]}" [label="LIKES", fontsize=9];')
+            
+        dot.append("}")
+        st.graphviz_chart("\n".join(dot), width="stretch")
+        
+        with st.expander("ข้อมูล Edge แบบตาราง"):
+            st.dataframe(pd.DataFrame(edges), width="stretch", hide_index=True)
 
-# ==========================================
-# 📖 อธิบายหลักการทำงาน
-# ==========================================
-with st.expander(" หลักการทำงานของระบบ"):
-    st.markdown("""
-    ### Graph-based Collaborative Filtering
-    
-    1. **สร้าง Graph 2 โหนด**: Person (คน) และ Computer (คอมพิวเตอร์)
-    2. **สร้างความสัมพันธ์**: `(Person)-[:LIKES]->(Computer)`
-    3. **หาคนที่ชอบคล้ายกัน**: ดู Neighbor ร่วมกันของคอมพิวเตอร์ที่คนๆ นั้นชอบ
-    4. **นับคะแนน**: คอมพิวเตอร์ที่คนมีความชอบคล้ายกันชอบ → บวกคะแนน +1
-    5. **เรียงลำดับ**: แนะนำรุ่นที่ได้คะแนนสูงสุด
-    
-    ### สูตรอย่างง่าย
-    ```
-    Score(Computer X) = จำนวนคนที่ชอบคอมพิวเตอร์เดียวกันกับเรา 
-                        และชอบ Computer X ด้วย
-    ```
-    """)
+# ------------------------------------------------------------------ Admin / Setup
+elif page == "Admin / Setup":
+    st.subheader("⚙️ Setup")
+    st.markdown(
+        """
+        **Graph schema:**
+        - `(:Person {name})-[:LIKES]->(:Computer {name, brand, category, price})`
+        """
+    )
+    st.warning("ปุ่มสร้างข้อมูลตัวอย่างใช้ MERGE จึงกดซ้ำได้และไม่ลบข้อมูลเดิม")
+    if st.button("สร้าง Constraint + Demo Data", type="primary", width="stretch"):
+        with st.spinner("กำลังสร้างข้อมูล..."):
+            seed_demo_data()
+        st.success("สร้างข้อมูลตัวอย่างเรียบร้อยแล้ว")
+        st.rerun()
 
-# ==========================================
-# 🔚 Footer
-# ==========================================
-st.divider()
-st.caption("💻 Final Project - Computer Recommender System with Graph Network | Built with Streamlit + NetworkX")
+    st.divider()
+    c1, c2 = st.columns(2)
+    new_person = c1.text_input("เพิ่ม Person ใหม่")
+    if c1.button("เพิ่มผู้ใช้") and new_person.strip():
+        add_person(new_person.strip())
+        st.success(f"เพิ่ม {new_person.strip()} แล้ว")
+        
+    st.divider()
+    with st.expander("Danger zone"):
+        st.caption("ลบเฉพาะ node :Person และ :Computer พร้อม LIKES ทั้งหมด")
+        if st.checkbox("ฉันเข้าใจและต้องการลบ") and st.button("ลบข้อมูลทั้งหมด"):
+            clear_graph_data()
+            st.success("ลบแล้ว")
+            st.rerun()
